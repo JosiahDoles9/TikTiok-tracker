@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TikTok Shop Tracker</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>TikTok Shop Tracker</h1>
+      <button id="syncBtn">Run Sync</button>
+      <span id="syncStatus">idle</span>
+    </header>
+
+    <nav>
+      <button data-page="dashboard">Dashboard</button>
+      <button data-page="trending">Trending</button>
+      <button data-page="products">Products</button>
+      <button data-page="analytics">Analytics</button>
+      <button data-page="tiktok">TikTok</button>
+    </nav>
+
+    <main id="app"></main>
+    <script src="/app.js"></script>
+  </body>
+</html>
