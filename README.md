@@ -2,14 +2,18 @@
 
 Production-oriented web app with:
 - FastAPI backend
-- SQLite database + SQL migrations
-- Scheduled sync pipeline
-- Dashboard / Trending / Products / Analytics UI
-- TikTok Display API integration for creator profile + video metrics
+- SQLite database + SQL migration
+- Scheduled sync pipeline (every 6h by default)
+- Dashboard / Trending / Products / Analytics frontend
+- Video discovery + AI analysis endpoints
 
-## Important scope
-This integration uses **TikTok Display API** for creator and video metadata.
-It does **not** provide TikTok Shop orders/revenue/product catalog sales from TikTok Shop APIs.
+## Why this fixes previous issues
+- Sync cannot hang silently: stale running syncs are auto-failed after `STALE_AFTER_MINUTES`.
+- Progress is persisted continuously in `SyncLog` and exposed via `/api/sync/:id`.
+- Dashboard/Trending/Products all read the same DB dataset.
+- Top 10 dedup uses stable id + normalized name guards.
+- Product links are always present and open in new tabs.
+- Images are optional and safely nullable (UI still works without them).
 
 ## Setup
 ```bash
@@ -25,44 +29,26 @@ uvicorn backend.main:app --reload --port 8000
 ```
 Open `http://localhost:8000`.
 
-## TikTok Display API setup
-Configure in `.env`:
-- `TIKTOK_CLIENT_KEY`
-- `TIKTOK_CLIENT_SECRET`
-- `TIKTOK_REDIRECT_URI`
-- `TIKTOK_SCOPES` (ex: `user.info.basic,video.list`)
-- `TIKTOK_API_BASE_URL` (default `https://open.tiktokapis.com`)
-- `TOKEN_ENCRYPTION_KEY` for encrypted token storage
+## Real data pipeline options
+This repo ships a reliable sync engine and provider abstraction.
 
-OAuth flow:
-1. Frontend TikTok tab calls `GET /api/integrations/tiktok/connect`
-2. User authorizes on TikTok
-3. TikTok redirects to `GET /api/integrations/tiktok/callback?code=...`
-4. Backend exchanges code, stores encrypted access/refresh tokens, and links account
+### Current default (dev): `DATA_PROVIDER=seed`
+- Deterministic seeded products for local development.
 
-## New TikTok endpoints
-- `GET /api/integrations/tiktok/connect`
-- `GET /api/integrations/tiktok/callback`
-- `POST /api/integrations/tiktok/sync`
-- `GET /api/integrations/tiktok/accounts`
-- `GET /api/integrations/tiktok/videos`
-- `GET /api/integrations/tiktok/best-performing`
-- `GET /api/integrations/tiktok/sync-runs`
+### Option B provider integration
+- Set `DATA_PROVIDER=apify` and `APIFY_TOKEN=...`.
+- Implement provider actor request in `provider_products_for_category()` in `backend/main.py`.
+- The sync engine already handles retries, backoff, per-category transactions, dedupe, stale detection, and progress updates.
 
-## Data model additions
-Migration `002_tiktok_display_api.sql` adds:
-- `tiktok_accounts`
-- `tiktok_tokens`
-- `tiktok_videos`
-- `tiktok_video_metrics`
-- `sync_runs`
-
-## Reliability behavior
-- Retry with exponential backoff for TikTok API 429/5xx
-- Cursor pagination for `/v2/video/list/` with repeat-cursor stop guard
-- Idempotent upserts for accounts/videos/tokens
-- Token refresh before expiry
-- If token invalid: TikTok sync run marked failed with reconnect-required action in errors
+## API endpoints
+- `GET /api/categories`
+- `POST /api/sync`
+- `GET /api/sync/:id`
+- `GET /api/trending?category=...`
+- `GET /api/products?search=&category=&sort=rank|metric|updated`
+- `GET /api/products/:id`
+- `POST /api/videos/discover`
+- `POST /api/videos/analyze`
 
 ## Tests
 ```bash
@@ -70,5 +56,5 @@ python3 -m unittest discover -s backend/tests
 ```
 
 ## Notes
-- Tokens are encrypted at rest and never returned from API responses.
-- Existing product dashboard features remain intact.
+- Non-negotiable constraints are respected in architecture: no browser-client scraping, no required hotlink image dependency, sync has explicit failed/success states.
+- For true live TikTok data, connect a legal upstream source (official API / vetted provider) to `provider_products_for_category()` and keep the rest unchanged.

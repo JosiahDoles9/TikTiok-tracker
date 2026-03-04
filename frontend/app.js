@@ -51,34 +51,6 @@ async function loadAnalytics(){
   <div class='card'><h3>Since last sync</h3>Products: ${d.totalProducts}</div>`;
 }
 
-async function loadTikTok(){
-  let accounts = [];
-  let best = [];
-  let videos = [];
-  try { accounts = await api('/api/integrations/tiktok/accounts'); } catch { accounts = []; }
-  try { best = await api('/api/integrations/tiktok/best-performing?limit=15'); } catch { best = []; }
-  try { videos = await api('/api/integrations/tiktok/videos'); } catch { videos = []; }
-
-  app.innerHTML = `<div class='card'>
-    <h3>TikTok Display API</h3>
-    <button id='connectTk'>Connect TikTok</button>
-    <div id='tkAccounts'>${accounts.length?accounts.map(a=>`<div>${a.display_name || a.open_id} <button class='syncTk' data-id='${a.id}'>Sync</button></div>`).join(''):'No connected accounts yet'}</div>
-  </div>
-  <div class='card'><h3>Best Performing Videos</h3>${best.length?best.map(v=>`<div><a target='_blank' href='${v.embed_link || v.share_url || '#'}'>${v.title || v.video_id}</a> · views ${fmt(v.view_count)} · likes ${fmt(v.like_count)}</div>`).join(''):'No video metrics yet'}</div>
-  <div class='card'><h3>Recent Video Library</h3>${videos.length?videos.slice(0,50).map(v=>`<div>${v.title || v.video_id} · ${v.create_time || ''} · <a target='_blank' href='${v.embed_link || v.share_url || '#'}'>Open</a></div>`).join(''):'No videos synced yet'}</div>`;
-
-  document.getElementById('connectTk').onclick = async ()=>{
-    const res = await api('/api/integrations/tiktok/connect');
-    window.location.href = res.authorizationUrl;
-  };
-  document.querySelectorAll('.syncTk').forEach(btn=>btn.onclick=async()=>{
-    const id = btn.dataset.id;
-    await api('/api/integrations/tiktok/sync',{method:'POST', body: JSON.stringify({accountId:id})});
-    alert('TikTok sync started/completed. Reloading...');
-    loadTikTok();
-  });
-}
-
 async function monitorSync(){
   if(!currentSyncId) return;
   const s = await api('/api/sync/'+currentSyncId);
@@ -94,5 +66,5 @@ async function startSync(){
 }
 
 document.getElementById('syncBtn').onclick = startSync;
-document.querySelectorAll('nav button').forEach(btn=>btn.onclick=()=>({dashboard:loadDashboard,trending:loadTrending,products:loadProducts,analytics:loadAnalytics,tiktok:loadTikTok}[btn.dataset.page]()));
+document.querySelectorAll('nav button').forEach(btn=>btn.onclick=()=>({dashboard:loadDashboard,trending:loadTrending,products:loadProducts,analytics:loadAnalytics}[btn.dataset.page]()));
 loadDashboard();

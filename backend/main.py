@@ -6,40 +6,32 @@ import sqlite3
 import threading
 import time
 import urllib.parse
+import urllib.request
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, HttpUrl
 
 from backend.core import CATEGORIES, SyncState, dedupe_products, is_stale, now_iso, normalize_name, stable_product_id
-from backend.db import db_conn, migrate
-from backend.services.tiktok_api_client import TikTokApiClient
-from backend.services.tiktok_auth_service import TikTokAuthService
-from backend.services.tiktok_sync_service import TikTokSyncService
 
 ROOT = Path(__file__).resolve().parents[1]
+DB_PATH = Path(os.getenv("DB_PATH", ROOT / "backend" / "app.db"))
 STALENESS_MINUTES = int(os.getenv("STALE_AFTER_MINUTES", "30"))
 SYNC_INTERVAL_SECONDS = int(os.getenv("SYNC_INTERVAL_SECONDS", str(6 * 3600)))
 DATA_PROVIDER = os.getenv("DATA_PROVIDER", "seed")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-TIKTOK_CLIENT_KEY = os.getenv("TIKTOK_CLIENT_KEY", "")
-TIKTOK_CLIENT_SECRET = os.getenv("TIKTOK_CLIENT_SECRET", "")
-TIKTOK_REDIRECT_URI = os.getenv("TIKTOK_REDIRECT_URI", "http://localhost:8000/api/integrations/tiktok/callback")
-TIKTOK_SCOPES = os.getenv("TIKTOK_SCOPES", "user.info.basic,video.list")
-TIKTOK_API_BASE_URL = os.getenv("TIKTOK_API_BASE_URL", "https://open.tiktokapis.com")
-
 app = FastAPI(title="TikTok Shop Tracker")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 sync_lock = threading.Lock()
-tiktok_sync_lock = threading.Lock()
 
 
 class VideoDiscoverInput(BaseModel):
@@ -54,8 +46,11 @@ class VideoAnalyzeInput(BaseModel):
     transcript: str | None = None
 
 
-class TikTokSyncInput(BaseModel):
-    accountId: str
+def db_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
 
 
 @contextmanager
@@ -67,11 +62,17 @@ def tx():
     finally:
         conn.close()
 
-def tiktok_services() -> tuple[TikTokApiClient, TikTokAuthService, TikTokSyncService]:
-    api = TikTokApiClient(TIKTOK_API_BASE_URL, TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET)
-    auth = TikTokAuthService(db_conn, api, TIKTOK_REDIRECT_URI, TIKTOK_SCOPES)
-    sync = TikTokSyncService(db_conn, auth, api)
-    return api, auth, sync
+
+def migrate() -> None:
+    sql = (ROOT / "backend" / "migrations" / "001_init.sql").read_text()
+    with db_conn() as conn:
+        conn.executescript(sql)
+
+
+def fetch_json(url: str, headers: dict[str, str] | None = None) -> Any:
+    req = urllib.request.Request(url, headers=headers or {"User-Agent": "TrackerBackend/1.0", "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=25) as res:
+        return json.loads(res.read().decode("utf-8"))
 
 
 def ai_analyze(video_url: str, metadata: dict[str, Any], transcript: str | None) -> dict[str, Any]:
@@ -96,6 +97,7 @@ def ai_analyze(video_url: str, metadata: dict[str, Any], transcript: str | None)
 
 
 def discover_videos(product_name: str, category: str) -> list[dict[str, Any]]:
+    base_query = urllib.parse.quote_plus(f"site:tiktok.com {product_name} {category}")
     return [
         {
             "videoUrl": f"https://www.tiktok.com/search?q={urllib.parse.quote_plus(product_name)}",
@@ -121,7 +123,9 @@ def discover_videos(product_name: str, category: str) -> list[dict[str, Any]]:
 
 
 def provider_products_for_category(category: str) -> list[dict[str, Any]]:
+    # Option B (Apify) placeholder implementation; seed fallback is deterministic.
     if DATA_PROVIDER == "apify" and APIFY_TOKEN:
+        # Replace this with concrete actor invocation once actor is selected.
         pass
     out = []
     for i in range(1, 15):
@@ -278,21 +282,10 @@ def trigger_sync_thread() -> str:
         return sync_id
 
 
-def sync_all_tiktok_accounts_daily() -> None:
-    _, auth, t_sync = tiktok_services()
-    for account in auth.list_accounts():
-        with tiktok_sync_lock:
-            t_sync.sync_account(account["id"])
-
-
 def scheduler_loop() -> None:
     while True:
         try:
             trigger_sync_thread()
-        except Exception:
-            pass
-        try:
-            sync_all_tiktok_accounts_daily()
         except Exception:
             pass
         time.sleep(SYNC_INTERVAL_SECONDS)
@@ -344,7 +337,11 @@ def api_trending(category: str | None = Query(default=None)) -> list[dict[str, A
 
 
 @app.get("/api/products")
-def api_products(search: str | None = None, category: str | None = None, sort: str = Query(default="rank", pattern="^(rank|metric|updated)$")) -> list[dict[str, Any]]:
+def api_products(
+    search: str | None = None,
+    category: str | None = None,
+    sort: str = Query(default="rank", pattern="^(rank|metric|updated)$"),
+) -> list[dict[str, Any]]:
     clauses = []
     params: list[Any] = []
     if search:
@@ -369,13 +366,17 @@ def api_product(product_id: str) -> dict[str, Any]:
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
     p = dict(product)
-    p["topVideos"] = [{**dict(v), "analysis": json.loads(v["ai_analysis_json"]) if v["ai_analysis_json"] else None} for v in videos]
+    p["topVideos"] = [
+        {**dict(v), "analysis": json.loads(v["ai_analysis_json"]) if v["ai_analysis_json"] else None}
+        for v in videos
+    ]
     return p
 
 
 @app.post("/api/videos/discover")
 def api_discover(input: VideoDiscoverInput) -> list[dict[str, Any]]:
-    return discover_videos(input.productName, input.category)[:3]
+    videos = discover_videos(input.productName, input.category)[:3]
+    return videos
 
 
 @app.post("/api/videos/analyze")
@@ -390,55 +391,13 @@ def api_dashboard() -> dict[str, Any]:
         by_cat = conn.execute("SELECT category, COUNT(*) c, COALESCE(SUM(metric_value),0) m FROM products GROUP BY category ORDER BY m DESC").fetchall()
         best = conn.execute("SELECT * FROM products ORDER BY metric_value DESC LIMIT 10").fetchall()
         sync = conn.execute("SELECT * FROM sync_logs ORDER BY started_at DESC LIMIT 1").fetchone()
-    return {"totalProducts": totals["c"], "totalMetric": totals["m"], "categories": [dict(r) for r in by_cat], "bestSellers": [dict(r) for r in best], "lastSync": dict(sync) if sync else None}
-
-
-@app.get("/api/integrations/tiktok/connect")
-def tiktok_connect() -> dict[str, str]:
-    if not TIKTOK_CLIENT_KEY or not TIKTOK_CLIENT_SECRET:
-        raise HTTPException(status_code=400, detail="TikTok integration is not configured")
-    _, auth, _ = tiktok_services()
-    return auth.authorization_url()
-
-
-@app.get("/api/integrations/tiktok/callback")
-def tiktok_callback(code: str | None = None, state: str | None = None, appUserId: str = "local-dev-user"):
-    if not code:
-        raise HTTPException(status_code=400, detail="Missing code")
-    _, auth, _ = tiktok_services()
-    data = auth.exchange_callback_code(appUserId, code)
-    return RedirectResponse(url=f"/?tiktokConnected=1&accountId={data['accountId']}")
-
-
-@app.post("/api/integrations/tiktok/sync")
-def tiktok_sync(input: TikTokSyncInput) -> dict[str, Any]:
-    _, _, sync = tiktok_services()
-    with tiktok_sync_lock:
-        return sync.sync_account(input.accountId)
-
-
-@app.get("/api/integrations/tiktok/accounts")
-def tiktok_accounts() -> list[dict[str, Any]]:
-    _, auth, _ = tiktok_services()
-    return auth.list_accounts()
-
-
-@app.get("/api/integrations/tiktok/videos")
-def tiktok_videos(accountId: str | None = None, title: str | None = None, since: str | None = None) -> list[dict[str, Any]]:
-    _, _, sync = tiktok_services()
-    return sync.list_videos(account_id=accountId, title=title, since=since)
-
-
-@app.get("/api/integrations/tiktok/best-performing")
-def tiktok_best(limit: int = 20) -> list[dict[str, Any]]:
-    _, _, sync = tiktok_services()
-    return sync.best_performing(limit)
-
-
-@app.get("/api/integrations/tiktok/sync-runs")
-def tiktok_runs(accountId: str | None = None) -> list[dict[str, Any]]:
-    _, _, sync = tiktok_services()
-    return sync.get_sync_runs(account_id=accountId)
+    return {
+        "totalProducts": totals["c"],
+        "totalMetric": totals["m"],
+        "categories": [dict(r) for r in by_cat],
+        "bestSellers": [dict(r) for r in best],
+        "lastSync": dict(sync) if sync else None,
+    }
 
 
 @app.get("/")
@@ -447,8 +406,8 @@ def root() -> FileResponse:
 
 
 @app.get("/{path:path}")
-def static_files(path: str):
+def static_files(path: str) -> FileResponse:
     target = ROOT / "frontend" / path
     if target.exists() and target.is_file():
         return FileResponse(target)
-    return JSONResponse(status_code=404, content={"detail": "Not found"})
+    raise HTTPException(status_code=404)
