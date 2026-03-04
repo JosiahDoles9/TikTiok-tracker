@@ -79,3 +79,32 @@ python3 -m unittest discover -s backend/tests
 - Check backend health: `http://localhost:8000/api/health` should return `{"status":"ok"}`.
 - The UI now shows an in-page error message with retry if API calls fail.
 - On first startup, the backend auto-triggers an initial sync when the products table is empty.
+
+
+## VS Code / macOS launch fix (No module named uvicorn)
+If you see:
+`No module named uvicorn`
+
+it means your debugger launched with a Python interpreter that is **not** your project venv.
+
+### 1) Install deps in your venv
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+### 2) Run with the same interpreter
+```bash
+python -m uvicorn main:app --reload --port 8000
+```
+
+### 3) VS Code interpreter
+Set VS Code Python interpreter to:
+`<repo>/.venv/bin/python`
+
+### 4) Correct ASGI module
+Both now work from repo root:
+- `python -m uvicorn main:app --reload --port 8000`
+- `python -m uvicorn backend.main:app --reload --port 8000`
